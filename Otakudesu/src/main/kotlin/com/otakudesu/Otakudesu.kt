@@ -1,7 +1,10 @@
 package com.otakudesu
 
+import android.util.Base64
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.*
+import org.json.JSONObject
+import org.jsoup.Jsoup
 import org.jsoup.nodes.Element
 
 class Otakudesu : MainAPI() {
@@ -83,23 +86,74 @@ class Otakudesu : MainAPI() {
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ): Boolean {
-        val document = app.get(data).document
+        val res = app.get(data)
+        val document = res.document
+        val htmlText = res.text
 
-        // Mengambil iframe pemutar utama
+        // 1. Cek iframe langsung jika tersedia
         document.select("div.responsive-embed-stream iframe, #pembed iframe").forEach { iframe ->
             val src = fixUrl(iframe.attr("src"))
-            if (src.isNotEmpty()) {
+            if (src.isNotEmpty() && src.startsWith("http")) {
                 loadExtractor(src, data, subtitleCallback, callback)
             }
         }
 
-        // Mengambil link dari daftar server mirror / download
-        document.select("div.mirrorstream ul li a, div.download ul li a").forEach { link ->
+        // 2. Ambil action name untuk request nonce AJAX Otakudesu
+        val nonceAction = Regex("""action\s*:\s*["']([a-zA-Z0-9_]+)["']""").findAll(htmlText)
+            .map { it.groupValues[1] }
+            .firstOrNull { it != "player_ajax" } ?: "aa1208d27f29ca340c92c66d1926f13f"
+
+        val ajaxUrl = "$mainUrl/wp-admin/admin-ajax.php"
+        val nonceRes = app.post(
+            ajaxUrl,
+            data = mapOf("action" to nonceAction),
+            referer = data
+        ).text
+
+        val nonce = try {
+            JSONObject(nonceRes).optString("data")
+        } catch (e: Exception) {
+            ""
+        }
+
+        // 3. Dekode tombol mirror stream (data-content Base64)
+        if (nonce.isNotEmpty()) {
+            document.select("div.mirrorstream ul li a[data-content]").forEach { el ->
+                try {
+                    val encodedData = el.attr("data-content")
+                    val decodedJson = String(Base64.decode(encodedData, Base64.DEFAULT))
+                    val jsonObj = JSONObject(decodedJson)
+
+                    val postData = mapOf(
+                        "id" to jsonObj.optString("id"),
+                        "i" to jsonObj.optString("i"),
+                        "q" to jsonObj.optString("q"),
+                        "nonce" to nonce,
+                        "action" to "2a3505c93b0035d3f455df82bf976b84"
+                    )
+
+                    val playerRes = app.post(ajaxUrl, data = postData, referer = data).text
+                    val embedHtmlBase64 = JSONObject(playerRes).optString("data")
+                    if (embedHtmlBase64.isNotEmpty()) {
+                        val iframeHtml = String(Base64.decode(embedHtmlBase64, Base64.DEFAULT))
+                        val iframeSrc = Jsoup.parse(iframeHtml).selectFirst("iframe")?.attr("src")
+                        if (!iframeSrc.isNullOrEmpty()) {
+                            loadExtractor(fixUrl(iframeSrc), data, subtitleCallback, callback)
+                        }
+                    }
+                } catch (_: Exception) {
+                }
+            }
+        }
+
+        // 4. Ambil juga link dari kotak download (Pixeldrain, Mega, Acefile, dll)
+        document.select("div.download ul li a").forEach { link ->
             val href = link.attr("href")
             if (href.startsWith("http")) {
                 loadExtractor(href, data, subtitleCallback, callback)
             }
         }
+
         return true
     }
 }
