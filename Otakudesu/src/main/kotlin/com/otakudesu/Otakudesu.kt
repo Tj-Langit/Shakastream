@@ -90,29 +90,35 @@ class Otakudesu : MainAPI() {
         val document = res.document
         val htmlText = res.text
 
-        // 1. Cek iframe langsung jika tersedia
+        // 1. Cek iframe bawaan halaman jika langsung tersedia
         document.select("div.responsive-embed-stream iframe, #pembed iframe").forEach { iframe ->
             val src = fixUrl(iframe.attr("src"))
-            if (src.isNotEmpty() && src.startsWith("http")) {
-                loadExtractor(src, data, subtitleCallback, callback)
+            if (src.startsWith("http")) {
+                loadExtractor(src, "$mainUrl/", subtitleCallback, callback)
             }
         }
 
-        // 2. Ambil action name untuk request nonce AJAX Otakudesu
-        val nonceAction = Regex("""action\s*:\s*["']([a-zA-Z0-9_]+)["']""").findAll(htmlText)
+        // 2. Ekstrak kedua hash action AJAX secara dinamis dari script halaman
+        val actionHashes = Regex("""action\s*:\s*["']([a-f0-9]{32})["']""")
+            .findAll(htmlText)
             .map { it.groupValues[1] }
-            .firstOrNull { it != "player_ajax" } ?: "aa1208d27f29ca340c92c66d1926f13f"
+            .distinct()
+            .toList()
 
+        val nonceAction = actionHashes.getOrNull(0) ?: "aa1208d27f29ca340c92c66d1926f13f"
+        val playerAction = actionHashes.getOrNull(1) ?: "2a3505c93b0035d3f455df82bf976b84"
         val ajaxUrl = "$mainUrl/wp-admin/admin-ajax.php"
+
         val nonceRes = app.post(
             ajaxUrl,
             data = mapOf("action" to nonceAction),
-            referer = data
+            referer = data,
+            headers = mapOf("X-Requested-With" to "XMLHttpRequest")
         ).text
 
         val nonce = try {
             JSONObject(nonceRes).optString("data")
-        } catch (e: Exception) {
+        } catch (_: Exception) {
             ""
         }
 
@@ -129,16 +135,23 @@ class Otakudesu : MainAPI() {
                         "i" to jsonObj.optString("i"),
                         "q" to jsonObj.optString("q"),
                         "nonce" to nonce,
-                        "action" to "2a3505c93b0035d3f455df82bf976b84"
+                        "action" to playerAction
                     )
 
-                    val playerRes = app.post(ajaxUrl, data = postData, referer = data).text
+                    val playerRes = app.post(
+                        ajaxUrl,
+                        data = postData,
+                        referer = data,
+                        headers = mapOf("X-Requested-With" to "XMLHttpRequest")
+                    ).text
+
                     val embedHtmlBase64 = JSONObject(playerRes).optString("data")
                     if (embedHtmlBase64.isNotEmpty()) {
                         val iframeHtml = String(Base64.decode(embedHtmlBase64, Base64.DEFAULT))
                         val iframeSrc = Jsoup.parse(iframeHtml).selectFirst("iframe")?.attr("src")
                         if (!iframeSrc.isNullOrEmpty()) {
-                            loadExtractor(fixUrl(iframeSrc), data, subtitleCallback, callback)
+                            val cleanSrc = fixUrl(iframeSrc)
+                            loadExtractor(cleanSrc, "$mainUrl/", subtitleCallback, callback)
                         }
                     }
                 } catch (_: Exception) {
@@ -146,11 +159,11 @@ class Otakudesu : MainAPI() {
             }
         }
 
-        // 4. Ambil juga link dari kotak download (Pixeldrain, Mega, Acefile, dll)
+        // 4. Ikuti link pengalihan dari kotak download jika mengarah ke host video langsung
         document.select("div.download ul li a").forEach { link ->
             val href = link.attr("href")
             if (href.startsWith("http")) {
-                loadExtractor(href, data, subtitleCallback, callback)
+                loadExtractor(href, "$mainUrl/", subtitleCallback, callback)
             }
         }
 
