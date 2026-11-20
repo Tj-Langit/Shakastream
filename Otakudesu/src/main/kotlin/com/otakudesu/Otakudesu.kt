@@ -80,43 +80,64 @@ class Otakudesu : MainAPI() {
         }
     }
 
-    // Fungsi khusus membongkar iframe player lokal Otakudesu (DesuStream, Odesu, dll)
     private suspend fun extractIframeVideo(
         iframeUrl: String,
-        qualityLabel: String,
+        label: String,
         referer: String,
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ) {
         val cleanUrl = fixUrl(iframeUrl)
-        // Coba extractor bawaan CloudStream terlebih dahulu
+        // 1. Jalankan extractor bawaan CloudStream (mendukung mp4upload, pixeldrain, krakenfiles, vidhide, dll)
         loadExtractor(cleanUrl, referer, subtitleCallback, callback)
 
-        // Bongkar manual isi HTML iframe jika menggunakan player lokal Otakudesu
+        // 2. Ekstraksi langsung dari HTML player lokal (DesuStream / Odesu / dll)
         try {
-            val playerHtml = app.get(cleanUrl, referer = referer).text
-            
-            // Cari pola link video langsung (.mp4 / .m3u8) di dalam script atau tag <source>
-            val videoRegex = Regex("""["'](https?://[^"']+\.(?:mp4|m3u8)[^"']*)["']""")
-            videoRegex.findAll(playerHtml).map { it.groupValues[1] }.distinct().forEach { videoUrl ->
-                val isM3u8 = videoUrl.contains(".m3u8", true)
+            val res = app.get(cleanUrl, referer = referer)
+            val playerHtml = res.text
+            val doc = res.document
+
+            // Cek tag <video> atau <source src="...">
+            doc.select("video source[src], video[src]").forEach { el ->
+                val src = fixUrl(el.attr("src"))
+                if (src.startsWith("http")) {
+                    callback.invoke(
+                        newExtractorLink(
+                            source = this.name,
+                            name = "${this.name} ($label)",
+                            url = src,
+                            type = if (src.contains(".m3u8")) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
+                        ) {
+                            this.referer = cleanUrl
+                            this.quality = getQualityFromName(label)
+                        }
+                    )
+                }
+            }
+
+            // Cari URL video di dalam blok <script> (termasuk karakter backslash \/ yang di-escape)
+            val unescapedHtml = playerHtml.replace("\\/", "/")
+            val videoRegex = Regex("""["'](https?://[^"'\s]+\.(?:mp4|m3u8)[^"'\s]*)["']""")
+            videoRegex.findAll(unescapedHtml).map { it.groupValues[1] }.distinct().forEach { videoUrl ->
                 callback.invoke(
                     newExtractorLink(
                         source = this.name,
-                        name = "${this.name} ($qualityLabel)",
+                        name = "${this.name} ($label)",
                         url = videoUrl,
-                        type = if (isM3u8) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
+                        type = if (videoUrl.contains(".m3u8")) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
                     ) {
                         this.referer = cleanUrl
-                        this.quality = getQualityFromName(qualityLabel)
+                        this.quality = getQualityFromName(label)
                     }
                 )
             }
 
-            // Cek jika di dalam iframe masih ada nested iframe lain
-            val nestedSrc = Jsoup.parse(playerHtml).selectFirst("iframe")?.attr("src")
-            if (!nestedSrc.isNullOrEmpty() && nestedSrc != cleanUrl) {
-                loadExtractor(fixUrl(nestedSrc), cleanUrl, subtitleCallback, callback)
+            // Cek jika ada iframe bersarang di dalamnya
+            doc.select("iframe[src]").forEach { nested ->
+                val nestedSrc = fixUrl(nested.attr("src"))
+                if (nestedSrc.startsWith("http") && nestedSrc != cleanUrl) {
+                    loadExtractor(nestedSrc, cleanUrl, subtitleCallback, callback)
+                }
             }
         } catch (_: Exception) {
         }
@@ -132,7 +153,7 @@ class Otakudesu : MainAPI() {
         val document = res.document
         val htmlText = res.text
 
-        // 1. Cek iframe default yang sudah tampil di layar
+        // 1. Cek iframe default pada halaman episode
         document.select("div.responsive-embed-stream iframe, #pembed iframe").forEach { iframe ->
             val src = iframe.attr("src")
             if (src.isNotEmpty()) {
@@ -140,33 +161,41 @@ class Otakudesu : MainAPI() {
             }
         }
 
-        // 2. Deteksi hash action untuk Nonce dan Player secara spesifik
-        val nonceAction = Regex("""data\s*:\s*\{\s*action\s*:\s*["']([a-f0-9]{32})["']\s*\}""")
-            .find(htmlText)?.groupValues?.getOrNull(1)
-            ?: "aa1208d27f29ca340c92c66d1926f13f"
-
-        val playerAction = Regex("""action\s*:\s*["']([a-f0-9]{32})["']""")
-            .findAll(htmlText)
+        // 2. Kumpulkan seluruh kandidat hash 32-karakter dari script halaman episode
+        val scriptText = document.select("script").joinToString("\n") { it.data() }
+        val hashes = Regex("""["']([a-f0-9]{32})["']""")
+            .findAll(scriptText.ifEmpty { htmlText })
             .map { it.groupValues[1] }
-            .firstOrNull { it != nonceAction }
-            ?: "2a3505c93b0035d3f455df82bf976b84"
+            .distinct()
+            .toList()
 
         val ajaxUrl = "$mainUrl/wp-admin/admin-ajax.php"
-        val nonceRes = app.post(
-            ajaxUrl,
-            data = mapOf("action" to nonceAction),
-            referer = data,
-            headers = mapOf("X-Requested-With" to "XMLHttpRequest")
-        ).text
+        var validNonce = ""
+        var validPlayerAction = ""
 
-        val nonce = try {
-            JSONObject(nonceRes).optString("data")
-        } catch (_: Exception) {
-            ""
+        // Uji kandidat hash untuk mendapatkan token nonce yang valid
+        for (candidate in hashes) {
+            try {
+                val testRes = app.post(
+                    ajaxUrl,
+                    data = mapOf("action" to candidate),
+                    referer = data,
+                    headers = mapOf("X-Requested-With" to "XMLHttpRequest")
+                ).text
+                if (testRes.trim().startsWith("{")) {
+                    val nonceVal = JSONObject(testRes).optString("data")
+                    if (nonceVal.isNotEmpty() && nonceVal != "false" && nonceVal != "0") {
+                        validNonce = nonceVal
+                        validPlayerAction = hashes.firstOrNull { it != candidate } ?: ""
+                        break
+                    }
+                }
+            } catch (_: Exception) {
+            }
         }
 
         // 3. Dekode tombol mirror stream (360p, 480p, 720p)
-        if (nonce.isNotEmpty()) {
+        if (validNonce.isNotEmpty() && validPlayerAction.isNotEmpty()) {
             document.select("div.mirrorstream ul").forEach { ul ->
                 val qualityText = ul.className().replace(Regex("[^0-9p]"), "").ifEmpty { "HD" }
                 ul.select("li a[data-content]").forEach { el ->
@@ -180,8 +209,8 @@ class Otakudesu : MainAPI() {
                             "id" to jsonObj.optString("id"),
                             "i" to jsonObj.optString("i"),
                             "q" to jsonObj.optString("q"),
-                            "nonce" to nonce,
-                            "action" to playerAction
+                            "nonce" to validNonce,
+                            "action" to validPlayerAction
                         )
 
                         val playerRes = app.post(
@@ -205,11 +234,18 @@ class Otakudesu : MainAPI() {
             }
         }
 
-        // 4. Cek link dari kotak download
+        // 4. Ikuti tautan pada kotak download (sering berisi Pixeldrain, Krakenfiles, Mp4upload, Acefile)
         document.select("div.download ul li a").forEach { link ->
             val href = link.attr("href")
             if (href.startsWith("http")) {
-                loadExtractor(href, data, subtitleCallback, callback)
+                try {
+                    // Ikuti pengalihan (safelink/desudrive) jika ada
+                    val resolved = app.get(href, referer = data)
+                    val finalUrl = resolved.url
+                    loadExtractor(finalUrl, data, subtitleCallback, callback)
+                } catch (_: Exception) {
+                    loadExtractor(href, data, subtitleCallback, callback)
+                }
             }
         }
 
