@@ -80,6 +80,48 @@ class Otakudesu : MainAPI() {
         }
     }
 
+    // Fungsi khusus membongkar iframe player lokal Otakudesu (DesuStream, Odesu, dll)
+    private suspend fun extractIframeVideo(
+        iframeUrl: String,
+        qualityLabel: String,
+        referer: String,
+        subtitleCallback: (SubtitleFile) -> Unit,
+        callback: (ExtractorLink) -> Unit
+    ) {
+        val cleanUrl = fixUrl(iframeUrl)
+        // Coba extractor bawaan CloudStream terlebih dahulu
+        loadExtractor(cleanUrl, referer, subtitleCallback, callback)
+
+        // Bongkar manual isi HTML iframe jika menggunakan player lokal Otakudesu
+        try {
+            val playerHtml = app.get(cleanUrl, referer = referer).text
+            
+            // Cari pola link video langsung (.mp4 / .m3u8) di dalam script atau tag <source>
+            val videoRegex = Regex("""["'](https?://[^"']+\.(?:mp4|m3u8)[^"']*)["']""")
+            videoRegex.findAll(playerHtml).map { it.groupValues[1] }.distinct().forEach { videoUrl ->
+                val isM3u8 = videoUrl.contains(".m3u8", true)
+                callback.invoke(
+                    newExtractorLink(
+                        source = this.name,
+                        name = "${this.name} ($qualityLabel)",
+                        url = videoUrl,
+                        type = if (isM3u8) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
+                    ) {
+                        this.referer = cleanUrl
+                        this.quality = getQualityFromName(qualityLabel)
+                    }
+                )
+            }
+
+            // Cek jika di dalam iframe masih ada nested iframe lain
+            val nestedSrc = Jsoup.parse(playerHtml).selectFirst("iframe")?.attr("src")
+            if (!nestedSrc.isNullOrEmpty() && nestedSrc != cleanUrl) {
+                loadExtractor(fixUrl(nestedSrc), cleanUrl, subtitleCallback, callback)
+            }
+        } catch (_: Exception) {
+        }
+    }
+
     override suspend fun loadLinks(
         data: String,
         isCasting: Boolean,
@@ -90,25 +132,26 @@ class Otakudesu : MainAPI() {
         val document = res.document
         val htmlText = res.text
 
-        // 1. Cek iframe bawaan halaman jika langsung tersedia
+        // 1. Cek iframe default yang sudah tampil di layar
         document.select("div.responsive-embed-stream iframe, #pembed iframe").forEach { iframe ->
-            val src = fixUrl(iframe.attr("src"))
-            if (src.startsWith("http")) {
-                loadExtractor(src, "$mainUrl/", subtitleCallback, callback)
+            val src = iframe.attr("src")
+            if (src.isNotEmpty()) {
+                extractIframeVideo(src, "Default", data, subtitleCallback, callback)
             }
         }
 
-        // 2. Ekstrak kedua hash action AJAX secara dinamis dari script halaman
-        val actionHashes = Regex("""action\s*:\s*["']([a-f0-9]{32})["']""")
+        // 2. Deteksi hash action untuk Nonce dan Player secara spesifik
+        val nonceAction = Regex("""data\s*:\s*\{\s*action\s*:\s*["']([a-f0-9]{32})["']\s*\}""")
+            .find(htmlText)?.groupValues?.getOrNull(1)
+            ?: "aa1208d27f29ca340c92c66d1926f13f"
+
+        val playerAction = Regex("""action\s*:\s*["']([a-f0-9]{32})["']""")
             .findAll(htmlText)
             .map { it.groupValues[1] }
-            .distinct()
-            .toList()
+            .firstOrNull { it != nonceAction }
+            ?: "2a3505c93b0035d3f455df82bf976b84"
 
-        val nonceAction = actionHashes.getOrNull(0) ?: "aa1208d27f29ca340c92c66d1926f13f"
-        val playerAction = actionHashes.getOrNull(1) ?: "2a3505c93b0035d3f455df82bf976b84"
         val ajaxUrl = "$mainUrl/wp-admin/admin-ajax.php"
-
         val nonceRes = app.post(
             ajaxUrl,
             data = mapOf("action" to nonceAction),
@@ -122,48 +165,51 @@ class Otakudesu : MainAPI() {
             ""
         }
 
-        // 3. Dekode tombol mirror stream (data-content Base64)
+        // 3. Dekode tombol mirror stream (360p, 480p, 720p)
         if (nonce.isNotEmpty()) {
-            document.select("div.mirrorstream ul li a[data-content]").forEach { el ->
-                try {
-                    val encodedData = el.attr("data-content")
-                    val decodedJson = String(Base64.decode(encodedData, Base64.DEFAULT))
-                    val jsonObj = JSONObject(decodedJson)
+            document.select("div.mirrorstream ul").forEach { ul ->
+                val qualityText = ul.className().replace(Regex("[^0-9p]"), "").ifEmpty { "HD" }
+                ul.select("li a[data-content]").forEach { el ->
+                    val serverName = el.text().trim()
+                    try {
+                        val encodedData = el.attr("data-content")
+                        val decodedJson = String(Base64.decode(encodedData, Base64.DEFAULT))
+                        val jsonObj = JSONObject(decodedJson)
 
-                    val postData = mapOf(
-                        "id" to jsonObj.optString("id"),
-                        "i" to jsonObj.optString("i"),
-                        "q" to jsonObj.optString("q"),
-                        "nonce" to nonce,
-                        "action" to playerAction
-                    )
+                        val postData = mapOf(
+                            "id" to jsonObj.optString("id"),
+                            "i" to jsonObj.optString("i"),
+                            "q" to jsonObj.optString("q"),
+                            "nonce" to nonce,
+                            "action" to playerAction
+                        )
 
-                    val playerRes = app.post(
-                        ajaxUrl,
-                        data = postData,
-                        referer = data,
-                        headers = mapOf("X-Requested-With" to "XMLHttpRequest")
-                    ).text
+                        val playerRes = app.post(
+                            ajaxUrl,
+                            data = postData,
+                            referer = data,
+                            headers = mapOf("X-Requested-With" to "XMLHttpRequest")
+                        ).text
 
-                    val embedHtmlBase64 = JSONObject(playerRes).optString("data")
-                    if (embedHtmlBase64.isNotEmpty()) {
-                        val iframeHtml = String(Base64.decode(embedHtmlBase64, Base64.DEFAULT))
-                        val iframeSrc = Jsoup.parse(iframeHtml).selectFirst("iframe")?.attr("src")
-                        if (!iframeSrc.isNullOrEmpty()) {
-                            val cleanSrc = fixUrl(iframeSrc)
-                            loadExtractor(cleanSrc, "$mainUrl/", subtitleCallback, callback)
+                        val embedHtmlBase64 = JSONObject(playerRes).optString("data")
+                        if (embedHtmlBase64.isNotEmpty()) {
+                            val iframeHtml = String(Base64.decode(embedHtmlBase64, Base64.DEFAULT))
+                            val iframeSrc = Jsoup.parse(iframeHtml).selectFirst("iframe")?.attr("src")
+                            if (!iframeSrc.isNullOrEmpty()) {
+                                extractIframeVideo(iframeSrc, "$serverName $qualityText", data, subtitleCallback, callback)
+                            }
                         }
+                    } catch (_: Exception) {
                     }
-                } catch (_: Exception) {
                 }
             }
         }
 
-        // 4. Ikuti link pengalihan dari kotak download jika mengarah ke host video langsung
+        // 4. Cek link dari kotak download
         document.select("div.download ul li a").forEach { link ->
             val href = link.attr("href")
             if (href.startsWith("http")) {
-                loadExtractor(href, "$mainUrl/", subtitleCallback, callback)
+                loadExtractor(href, data, subtitleCallback, callback)
             }
         }
 
