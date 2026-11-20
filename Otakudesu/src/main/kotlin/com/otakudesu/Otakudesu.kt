@@ -88,16 +88,15 @@ class Otakudesu : MainAPI() {
         callback: (ExtractorLink) -> Unit
     ) {
         val cleanUrl = fixUrl(iframeUrl)
-        // 1. Jalankan extractor bawaan CloudStream (mendukung mp4upload, pixeldrain, krakenfiles, vidhide, dll)
+        // Jalankan extractor bawaan CloudStream (vidhide, mega, pixeldrain, dll)
         loadExtractor(cleanUrl, referer, subtitleCallback, callback)
 
-        // 2. Ekstraksi langsung dari HTML player lokal (DesuStream / Odesu / dll)
+        // Ekstraksi langsung dari player lokal desustream.net / odcdn / odstream
         try {
             val res = app.get(cleanUrl, referer = referer)
             val playerHtml = res.text
             val doc = res.document
 
-            // Cek tag <video> atau <source src="...">
             doc.select("video source[src], video[src]").forEach { el ->
                 val src = fixUrl(el.attr("src"))
                 if (src.startsWith("http")) {
@@ -115,9 +114,9 @@ class Otakudesu : MainAPI() {
                 }
             }
 
-            // Cari URL video di dalam blok <script> (termasuk karakter backslash \/ yang di-escape)
             val unescapedHtml = playerHtml.replace("\\/", "/")
-            val videoRegex = Regex("""["'](https?://[^"'\s]+\.(?:mp4|m3u8)[^"'\s]*)["']""")
+            // Tangkap URL video .mp4 / .m3u8 atau link Googleusercontent / Blogger video
+            val videoRegex = Regex("""["'](https?://[^"'\s]+(?:\.(?:mp4|m3u8)|videoplayback|googlevideo\.com)[^"'\s]*)["']""")
             videoRegex.findAll(unescapedHtml).map { it.groupValues[1] }.distinct().forEach { videoUrl ->
                 callback.invoke(
                     newExtractorLink(
@@ -132,7 +131,7 @@ class Otakudesu : MainAPI() {
                 )
             }
 
-            // Cek jika ada iframe bersarang di dalamnya
+            // Cek iframe bersarang di dalam desustream.net
             doc.select("iframe[src]").forEach { nested ->
                 val nestedSrc = fixUrl(nested.attr("src"))
                 if (nestedSrc.startsWith("http") && nestedSrc != cleanUrl) {
@@ -153,18 +152,17 @@ class Otakudesu : MainAPI() {
         val document = res.document
         val htmlText = res.text
 
-        // 1. Cek iframe default pada halaman episode
+        // 1. Cek iframe default (desustream.net/dstream/odcdn/...)
         document.select("div.responsive-embed-stream iframe, #pembed iframe").forEach { iframe ->
             val src = iframe.attr("src")
             if (src.isNotEmpty()) {
-                extractIframeVideo(src, "Default", data, subtitleCallback, callback)
+                extractIframeVideo(src, "Default 480p", data, subtitleCallback, callback)
             }
         }
 
-        // 2. Kumpulkan seluruh kandidat hash 32-karakter dari script halaman episode
-        val scriptText = document.select("script").joinToString("\n") { it.data() }
+        // 2. Kumpulkan semua hash 32-karakter dari seluruh HTML (termasuk script di bagian bawah halaman)
         val hashes = Regex("""["']([a-f0-9]{32})["']""")
-            .findAll(scriptText.ifEmpty { htmlText })
+            .findAll(htmlText)
             .map { it.groupValues[1] }
             .distinct()
             .toList()
@@ -173,7 +171,6 @@ class Otakudesu : MainAPI() {
         var validNonce = ""
         var validPlayerAction = ""
 
-        // Uji kandidat hash untuk mendapatkan token nonce yang valid
         for (candidate in hashes) {
             try {
                 val testRes = app.post(
@@ -194,7 +191,7 @@ class Otakudesu : MainAPI() {
             }
         }
 
-        // 3. Dekode tombol mirror stream (360p, 480p, 720p)
+        // 3. Dekode tombol mirror stream (vidhide, odcdn, odstream, mega)
         if (validNonce.isNotEmpty() && validPlayerAction.isNotEmpty()) {
             document.select("div.mirrorstream ul").forEach { ul ->
                 val qualityText = ul.className().replace(Regex("[^0-9p]"), "").ifEmpty { "HD" }
@@ -234,17 +231,26 @@ class Otakudesu : MainAPI() {
             }
         }
 
-        // 4. Ikuti tautan pada kotak download (sering berisi Pixeldrain, Krakenfiles, Mp4upload, Acefile)
-        document.select("div.download ul li a").forEach { link ->
+        // 4. Bongkar safelink link.desustream.com pada kotak download (Pdrain, Acefile, GoFile, Mega)
+        document.select("div.download ul li a[href]").forEach { link ->
+            val hostName = link.text().trim()
             val href = link.attr("href")
-            if (href.startsWith("http")) {
+            if (href.startsWith("http") && (hostName.contains("Pdrain", true) || hostName.contains("Mega", true) || hostName.contains("Acefile", true) || hostName.contains("GoFile", true))) {
                 try {
-                    // Ikuti pengalihan (safelink/desudrive) jika ada
-                    val resolved = app.get(href, referer = data)
-                    val finalUrl = resolved.url
-                    loadExtractor(finalUrl, data, subtitleCallback, callback)
+                    val safeRes = app.get(href, referer = data)
+                    val safeHtml = safeRes.text
+                    // Cari tautan asli di dalam halaman safelink link.desustream.com
+                    val targetUrl = safeRes.document.select("a[href]").map { it.attr("href") }
+                        .firstOrNull {
+                            it.contains("pixeldrain.com") || it.contains("mega.nz") || it.contains("acefile.co") || it.contains("gofile.io")
+                        }
+                        ?: Regex("""["'](https?://(?:pixeldrain\.com|mega\.nz|acefile\.co|gofile\.io)[^"']+)["']""").find(safeHtml)?.groupValues?.getOrNull(1)
+                        ?: safeRes.url
+
+                    if (targetUrl.startsWith("http") && !targetUrl.contains("link.desustream.com")) {
+                        loadExtractor(targetUrl, href, subtitleCallback, callback)
+                    }
                 } catch (_: Exception) {
-                    loadExtractor(href, data, subtitleCallback, callback)
                 }
             }
         }
