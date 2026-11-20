@@ -90,8 +90,13 @@ class Otakudesu : MainAPI() {
         val cleanUrl = fixUrl(iframeUrl)
         val qualityNum = getQualityFromName(label)
 
-        // Bungkus callback agar label resolusi (360p/480p/720p) selalu tampil di menu Sumber
-        val labeledCallback: (ExtractorLink) -> Unit = { link ->
+        // Kumpulkan link dari loadExtractor terlebih dahulu agar newExtractorLink dipanggil di dalam coroutine body
+        val collectedLinks = mutableListOf<ExtractorLink>()
+        loadExtractor(cleanUrl, referer, subtitleCallback) { link ->
+            collectedLinks.add(link)
+        }
+
+        for (link in collectedLinks) {
             val newName = if (link.name.contains(label, true)) {
                 link.name
             } else {
@@ -111,10 +116,7 @@ class Otakudesu : MainAPI() {
             )
         }
 
-        // 1. Jalankan extractor bawaan CloudStream dengan labeledCallback
-        loadExtractor(cleanUrl, referer, subtitleCallback, labeledCallback)
-
-        // 2. Ekstraksi langsung dari player lokal desustream.net / odcdn / odstream
+        // Ekstraksi langsung dari player lokal desustream.net / odcdn / odstream
         try {
             val res = app.get(cleanUrl, referer = referer)
             val playerHtml = res.text
@@ -123,10 +125,10 @@ class Otakudesu : MainAPI() {
             doc.select("video source[src], video[src]").forEach { el ->
                 val src = fixUrl(el.attr("src"))
                 if (src.startsWith("http")) {
-                    labeledCallback.invoke(
+                    callback.invoke(
                         newExtractorLink(
                             source = this.name,
-                            name = this.name,
+                            name = "${this.name} [$label]",
                             url = src,
                             type = if (src.contains(".m3u8")) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
                         ) {
@@ -140,10 +142,10 @@ class Otakudesu : MainAPI() {
             val unescapedHtml = playerHtml.replace("\\/", "/")
             val videoRegex = Regex("""["'](https?://[^"'\s]+(?:\.(?:mp4|m3u8)|videoplayback|googlevideo\.com)[^"'\s]*)["']""")
             videoRegex.findAll(unescapedHtml).map { it.groupValues[1] }.distinct().forEach { videoUrl ->
-                labeledCallback.invoke(
+                callback.invoke(
                     newExtractorLink(
                         source = this.name,
-                        name = this.name,
+                        name = "${this.name} [$label]",
                         url = videoUrl,
                         type = if (videoUrl.contains(".m3u8")) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
                     ) {
@@ -153,11 +155,34 @@ class Otakudesu : MainAPI() {
                 )
             }
 
+            val nestedLinks = mutableListOf<ExtractorLink>()
             doc.select("iframe[src]").forEach { nested ->
                 val nestedSrc = fixUrl(nested.attr("src"))
                 if (nestedSrc.startsWith("http") && nestedSrc != cleanUrl) {
-                    loadExtractor(nestedSrc, cleanUrl, subtitleCallback, labeledCallback)
+                    loadExtractor(nestedSrc, cleanUrl, subtitleCallback) { link ->
+                        nestedLinks.add(link)
+                    }
                 }
+            }
+
+            for (link in nestedLinks) {
+                val newName = if (link.name.contains(label, true)) {
+                    link.name
+                } else {
+                    "${link.name} [$label]"
+                }
+                callback.invoke(
+                    newExtractorLink(
+                        source = link.source,
+                        name = newName,
+                        url = link.url,
+                        type = link.type
+                    ) {
+                        this.referer = link.referer
+                        this.quality = if (link.quality == Qualities.Unknown.value) qualityNum else link.quality
+                        this.headers = link.headers
+                    }
+                )
             }
         } catch (_: Exception) {
         }
