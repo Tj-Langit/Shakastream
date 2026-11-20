@@ -1,0 +1,65 @@
+[
+    {
+        "fileHash": "sha256-1a1d7371a43f7d041dcd0743dfaf5f47b4a18ed383172dbdd64b9347853ce5df",
+        "apiVersion": 1,
+        "repositoryUrl": "https://github.com/Tj-Langit/Shakastream",
+        "fileSize": 29184,
+        "status": 1,
+        "language": "id",
+        "authors": [
+            "Asm0d3usX"
+        ],
+        "tvTypes": [
+            "Movie",
+            "TvSeries",
+            "AsianDrama"
+        ],
+        "version": 2,
+        "internalName": "Dutamovie",
+        "description": "DutaMovie - Streaming Movie and TV Series",
+        "url": "https://raw.githubusercontent.com/Tj-Langit/Shakastream/builds/Dutamovie.cs3",
+        "name": "Dutamovie"
+    },
+    {
+        "fileHash": "sha256-103a15d9c5396fd7d3d009e08f50ea5c560ba79cee1e00c3e373a57a71c20318",
+        "apiVersion": 1,
+        "repositoryUrl": "https://github.com/Tj-Langit/Shakastream",
+        "fileSize": 22757,
+        "status": 1,
+        "language": "id",
+        "authors": [
+            "Asm0d3usX"
+        ],
+        "tvTypes": [
+            "Movie",
+            "TvSeries",
+            "AsianDrama"
+        ],
+        "version": 1,
+        "internalName": "Indomax",
+        "description": "Indomax - Streaming Movie and TV Series",
+        "url": "https://raw.githubusercontent.com/Tj-Langit/Shakastream/builds/Indomax.cs3",
+        "name": "Indomax"
+    },
+    {
+        "iconUrl": "https://www.google.com/s2/favicons?domain=otakudesu.blog&sz=%size%",
+        "fileHash": "sha256-5702ee3df42c8180c75477e3bba8100d9e7b5705af5078ac79a6e52b04b09a4d",
+        "apiVersion": 1,
+        "repositoryUrl": "https://github.com/Tj-Langit/Shakastream",
+        "fileSize": 27842,
+        "status": 1,
+        "authors": [
+            "Tj-Langit"
+        ],
+        "tvTypes": [
+            "Anime",
+            "AnimeMovie",
+            "OVA"
+        ],
+        "version": 7,
+        "internalName": "Otakudesu",
+        "description": "Nonton Anime Sub Indo dari Otakudesu",
+        "url": "https://raw.githubusercontent.com/Tj-Langit/Shakastream/builds/Otakudesu.cs3",
+        "name": "Otakudesu"
+    }
+]

@@ -1,0 +1,9 @@
+{
+  "name": "Shakastream Repo",
+  "description": "Repositori CloudStream Pribadi",
+  "manifestVersion": 1,
+  "pluginLists": [
+    "https://raw.githubusercontent.com/Tj-Langit/Shakastream/builds/plugins.json"
+  ]
+}
+
