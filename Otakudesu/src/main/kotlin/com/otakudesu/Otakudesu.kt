@@ -88,10 +88,33 @@ class Otakudesu : MainAPI() {
         callback: (ExtractorLink) -> Unit
     ) {
         val cleanUrl = fixUrl(iframeUrl)
-        // Jalankan extractor bawaan CloudStream (vidhide, mega, pixeldrain, dll)
-        loadExtractor(cleanUrl, referer, subtitleCallback, callback)
+        val qualityNum = getQualityFromName(label)
 
-        // Ekstraksi langsung dari player lokal desustream.net / odcdn / odstream
+        // Bungkus callback agar label resolusi (360p/480p/720p) selalu tampil di menu Sumber
+        val labeledCallback: (ExtractorLink) -> Unit = { link ->
+            val newName = if (link.name.contains(label, true)) {
+                link.name
+            } else {
+                "${link.name} [$label]"
+            }
+            callback.invoke(
+                newExtractorLink(
+                    source = link.source,
+                    name = newName,
+                    url = link.url,
+                    type = link.type
+                ) {
+                    this.referer = link.referer
+                    this.quality = if (link.quality == Qualities.Unknown.value) qualityNum else link.quality
+                    this.headers = link.headers
+                }
+            )
+        }
+
+        // 1. Jalankan extractor bawaan CloudStream dengan labeledCallback
+        loadExtractor(cleanUrl, referer, subtitleCallback, labeledCallback)
+
+        // 2. Ekstraksi langsung dari player lokal desustream.net / odcdn / odstream
         try {
             val res = app.get(cleanUrl, referer = referer)
             val playerHtml = res.text
@@ -100,42 +123,40 @@ class Otakudesu : MainAPI() {
             doc.select("video source[src], video[src]").forEach { el ->
                 val src = fixUrl(el.attr("src"))
                 if (src.startsWith("http")) {
-                    callback.invoke(
+                    labeledCallback.invoke(
                         newExtractorLink(
                             source = this.name,
-                            name = "${this.name} ($label)",
+                            name = this.name,
                             url = src,
                             type = if (src.contains(".m3u8")) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
                         ) {
                             this.referer = cleanUrl
-                            this.quality = getQualityFromName(label)
+                            this.quality = qualityNum
                         }
                     )
                 }
             }
 
             val unescapedHtml = playerHtml.replace("\\/", "/")
-            // Tangkap URL video .mp4 / .m3u8 atau link Googleusercontent / Blogger video
             val videoRegex = Regex("""["'](https?://[^"'\s]+(?:\.(?:mp4|m3u8)|videoplayback|googlevideo\.com)[^"'\s]*)["']""")
             videoRegex.findAll(unescapedHtml).map { it.groupValues[1] }.distinct().forEach { videoUrl ->
-                callback.invoke(
+                labeledCallback.invoke(
                     newExtractorLink(
                         source = this.name,
-                        name = "${this.name} ($label)",
+                        name = this.name,
                         url = videoUrl,
                         type = if (videoUrl.contains(".m3u8")) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
                     ) {
                         this.referer = cleanUrl
-                        this.quality = getQualityFromName(label)
+                        this.quality = qualityNum
                     }
                 )
             }
 
-            // Cek iframe bersarang di dalam desustream.net
             doc.select("iframe[src]").forEach { nested ->
                 val nestedSrc = fixUrl(nested.attr("src"))
                 if (nestedSrc.startsWith("http") && nestedSrc != cleanUrl) {
-                    loadExtractor(nestedSrc, cleanUrl, subtitleCallback, callback)
+                    loadExtractor(nestedSrc, cleanUrl, subtitleCallback, labeledCallback)
                 }
             }
         } catch (_: Exception) {
@@ -160,7 +181,7 @@ class Otakudesu : MainAPI() {
             }
         }
 
-        // 2. Kumpulkan semua hash 32-karakter dari seluruh HTML (termasuk script di bagian bawah halaman)
+        // 2. Kumpulkan semua hash 32-karakter dari seluruh HTML
         val hashes = Regex("""["']([a-f0-9]{32})["']""")
             .findAll(htmlText)
             .map { it.groupValues[1] }
@@ -239,7 +260,6 @@ class Otakudesu : MainAPI() {
                 try {
                     val safeRes = app.get(href, referer = data)
                     val safeHtml = safeRes.text
-                    // Cari tautan asli di dalam halaman safelink link.desustream.com
                     val targetUrl = safeRes.document.select("a[href]").map { it.attr("href") }
                         .firstOrNull {
                             it.contains("pixeldrain.com") || it.contains("mega.nz") || it.contains("acefile.co") || it.contains("gofile.io")
