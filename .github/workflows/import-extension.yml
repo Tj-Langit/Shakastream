@@ -4,13 +4,13 @@ on:
   workflow_dispatch:
     inputs:
       repo_url:
-        description: 'URL Repositori Sumber (contoh: https://github.com/pembuat/repo)'
+        description: 'URL Repositori Sumber (boleh lengkap dengan /tree/main/)'
         required: true
         type: string
       branch:
-        description: 'Cabang Repositori Sumber (biasanya master atau main)'
-        required: true
-        default: 'master'
+        description: 'Cabang Repositori Sumber (kosongkan jika sudah ada di URL)'
+        required: false
+        default: 'main'
         type: string
       extension_folder:
         description: 'Nama Folder Ekstensi (contoh: Samehadaku)'
@@ -27,13 +27,27 @@ jobs:
       - name: Checkout Shakastream
         uses: actions/checkout@v4
 
-      - name: Clone & Copy Extension Folder
+      - name: Parse URL & Clone Extension Folder
         run: |
-          git clone --depth 1 --branch "${{ inputs.branch }}" "${{ inputs.repo_url }}" source_repo
+          RAW_URL="${{ inputs.repo_url }}"
+          BRANCH="${{ inputs.branch }}"
+
+          # Jika URL mengandung /tree/<branch>, ekstrak nama branch dan bersihkan URL dasar
+          if [[ "$RAW_URL" =~ (https://github\.com/[^/]+/[^/]+)/tree/([^/]+) ]]; then
+            CLEAN_URL="${BASH_REMATCH[1]}"
+            BRANCH="${BASH_REMATCH[2]}"
+          else
+            CLEAN_URL=$(echo "$RAW_URL" | sed -E 's|(https://github\.com/[^/]+/[^/]+).*|\1|')
+          fi
+
+          echo "Cloning $CLEAN_URL (branch: $BRANCH)..."
+          git clone --depth 1 --branch "$BRANCH" "$CLEAN_URL" source_repo
+
           if [ ! -d "source_repo/${{ inputs.extension_folder }}" ]; then
             echo "Error: Folder '${{ inputs.extension_folder }}' tidak ditemukan di repositori sumber!"
             exit 1
           fi
+
           rm -rf "${{ inputs.extension_folder }}"
           cp -r "source_repo/${{ inputs.extension_folder }}" "./${{ inputs.extension_folder }}"
           rm -rf source_repo
@@ -51,6 +65,7 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add "${{ inputs.extension_folder }}" settings.gradle.kts
+          git diff --staged --quiet && echo "Tidak ada perubahan" && exit 0
           git commit -m "Import extension: ${{ inputs.extension_folder }}"
           git push
           
