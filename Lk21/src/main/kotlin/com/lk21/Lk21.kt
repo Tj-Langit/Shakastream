@@ -18,40 +18,63 @@ class Lk21 : MainAPI() {
         TvType.Anime
     )
 
+    private val requestHeaders = mapOf(
+        "User-Agent" to "Mozilla/5.0 (Linux; Android 14; Mobile) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Mobile Safari/537.36",
+        "Referer" to "$mainUrl/"
+    )
+
     override val mainPage = mainPageOf(
-        "$mainUrl/populer/page/" to "Film Terpopuler",
-        "$mainUrl/latest/page/" to "Baru Diupload",
-        "$mainUrl/rating/page/" to "Rating Tertinggi",
-        "$mainUrl/release/page/" to "Rilis Terbaru",
-        "$mainUrl/top-movie-today/page/" to "Film Unggulan"
+        "$mainUrl/populer" to "Film Terpopuler",
+        "$mainUrl/latest" to "Baru Diupload",
+        "$mainUrl/rating" to "Rating Tertinggi",
+        "$mainUrl/release" to "Rilis Terbaru",
+        "$mainUrl/top-movie-today" to "Film Unggulan"
     )
 
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {
-        val url = if (page == 1) {
-            request.data.removeSuffix("/page/")
+        val url = if (page <= 1) {
+            request.data
         } else {
-            request.data + page
+            "${request.data}/page/$page"
         }
-        val document = app.get(url).document
-        val home = document.select("article[itemtype*='schema.org/Movie']").mapNotNull {
+        val document = app.get(url, headers = requestHeaders).document
+        val home = document.select("div.gallery-grid article, ul.sliders li.slider article, article[itemtype*='Movie'], article").mapNotNull {
             it.toSearchResult()
-        }
-        return newHomePageResponse(request.name, home)
+        }.distinctBy { it.url }
+
+        return newHomePageResponse(
+            list = HomePageList(request.name, home, isHorizontalImages = false),
+            hasNext = home.isNotEmpty()
+        )
     }
 
     private fun Element.toSearchResult(): SearchResponse? {
-        val anchor = this.selectFirst("figure > a") ?: return null
-        val title = this.selectFirst("h3.poster-title")?.text()?.trim()
-            ?: anchor.attr("title").replace("Nonton movie ", "").replace("Nonton series ", "").replace(" streaming gratis", "").trim()
+        val anchor = this.selectFirst("figure a[href], a[itemprop='url'], a[href]") ?: return null
+        val rawHref = anchor.attr("href")
+        if (rawHref.isEmpty() || rawHref.startsWith("#") || rawHref.contains("/genre/") || rawHref.contains("/country/") || rawHref.contains("/year/")) {
+            return null
+        }
+
+        val title = this.selectFirst("h3.poster-title, figcaption h3, [itemprop='name']")?.text()?.trim()
+            ?: anchor.attr("title")
+                .replace(Regex("""^Nonton (movie|series)\s+""", RegexOption.IGNORE_CASE), "")
+                .replace(Regex("""\s+streaming gratis$""", RegexOption.IGNORE_CASE), "")
+                .trim()
         if (title.isEmpty()) return null
 
-        val href = fixUrl(anchor.attr("href"))
-        val img = this.selectFirst("img[itemprop='image']")
-        val posterUrl = fixUrlNull(img?.attr("data-src")?.ifEmpty { img.attr("src") })
-        val year = this.selectFirst("span.year")?.text()?.trim()?.toIntOrNull()
-        val ratingText = this.selectFirst("span[itemprop='ratingValue']")?.text()?.trim()
+        val href = fixUrl(rawHref)
+        val img = this.selectFirst("img")
+        val posterUrl = fixUrlNull(
+            img?.attr("data-src")?.ifEmpty {
+                img.attr("src").ifEmpty {
+                    img.attr("srcset").split(" ").firstOrNull()
+                }
+            }
+        )
+        val year = this.selectFirst("span.year, [itemprop='datePublished']")?.text()?.trim()?.toIntOrNull()
+        val ratingText = this.selectFirst("span[itemprop='ratingValue'], span.rating")?.text()?.trim()
         val epText = this.selectFirst("span.episode strong")?.text()?.trim()?.toIntOrNull()
-        val isSeries = this.selectFirst("span.episode") != null
+        val isSeries = this.selectFirst("span.episode") != null || anchor.attr("title").contains("series", true)
 
         return if (isSeries) {
             newAnimeSearchResponse(title, href, TvType.TvSeries) {
@@ -69,19 +92,19 @@ class Lk21 : MainAPI() {
     }
 
     override suspend fun search(query: String): List<SearchResponse> {
-        val document = app.get("$mainUrl/search?s=$query").document
-        return document.select("article[itemtype*='schema.org/Movie']").mapNotNull {
+        val document = app.get("$mainUrl/search?s=$query", headers = requestHeaders).document
+        return document.select("div.gallery-grid article, article[itemtype*='Movie'], article").mapNotNull {
             it.toSearchResult()
-        }
+        }.distinctBy { it.url }
     }
 
     override suspend fun load(url: String): LoadResponse? {
-        val document = app.get(url).document
-        val rawTitle = document.selectFirst("div.movie-info > h1")?.text()?.trim() ?: return null
+        val document = app.get(url, headers = requestHeaders).document
+        val rawTitle = document.selectFirst("div.movie-info > h1, h1")?.text()?.trim() ?: return null
         val title = rawTitle.replace(Regex("""\(\d{4}\)$"""), "").trim()
         val year = Regex("""\((\d{4})\)$""").find(rawTitle)?.groupValues?.getOrNull(1)?.toIntOrNull()
 
-        val img = document.selectFirst("div.detail img[itemprop='image']")
+        val img = document.selectFirst("div.detail img[itemprop='image'], div.movie-info img, picture img")
         val poster = fixUrlNull(img?.attr("data-src")?.ifEmpty { img.attr("src") })
         val plot = document.selectFirst("div.synopsis")?.text()?.trim()
         val tags = document.select("div.tag-list span.tag a[href*='/genre/']").map { it.text().trim() }
@@ -100,7 +123,6 @@ class Lk21 : MainAPI() {
             }
         }
 
-        // Cek apakah halaman memiliki daftar episode (untuk Series)
         val episodeLinks = document.select("ul#episode-list li a, div.episode-list a").mapNotNull { ep ->
             val epHref = fixUrl(ep.attr("href"))
             val epName = ep.text().trim()
@@ -162,13 +184,11 @@ class Lk21 : MainAPI() {
             )
         }
 
-        // Ekstraksi langsung jika menggunakan wrapper iframe videonode.de (p2p / cast / hydrax)
         try {
-            val res = app.get(cleanUrl, referer = referer)
+            val res = app.get(cleanUrl, referer = referer, headers = requestHeaders)
             val html = res.text
             val doc = res.document
 
-            // Cek nested iframe di dalam videonode.de
             val nestedLinks = mutableListOf<ExtractorLink>()
             doc.select("iframe[src]").forEach { iframe ->
                 val nestedSrc = fixUrl(iframe.attr("src"))
@@ -194,7 +214,6 @@ class Lk21 : MainAPI() {
                 )
             }
 
-            // Cari stream .m3u8 atau .mp4 langsung di dalam script halaman player
             val unescaped = html.replace("\\/", "/")
             Regex("""["'](https?://[^"'\s]+\.(?:m3u8|mp4)[^"'\s]*)["']""")
                 .findAll(unescaped)
@@ -223,10 +242,9 @@ class Lk21 : MainAPI() {
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ): Boolean {
-        val document = app.get(data).document
+        val document = app.get(data, headers = requestHeaders).document
         val servers = mutableMapOf<String, String>()
 
-        // 1. Ambil semua server dari daftar ul#player-list (P2P, CAST, HYDRAX)
         document.select("ul#player-list li a[data-url]").forEach { el ->
             val url = el.attr("data-url").trim()
             val label = el.text().trim().ifEmpty { el.attr("data-server").uppercase() }
@@ -235,7 +253,6 @@ class Lk21 : MainAPI() {
             }
         }
 
-        // 2. Fallback dari iframe utama jika daftar kosong
         if (servers.isEmpty()) {
             document.selectFirst("iframe#main-player")?.attr("src")?.let { src ->
                 if (src.isNotEmpty()) {
