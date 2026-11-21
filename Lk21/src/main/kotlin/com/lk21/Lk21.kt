@@ -2,7 +2,9 @@ package com.lk21
 
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.LoadResponse.Companion.addActors
+import com.lagradost.cloudstream3.network.CloudflareKiller
 import com.lagradost.cloudstream3.utils.*
+import org.json.JSONObject
 import org.jsoup.nodes.Element
 
 class Lk21 : MainAPI() {
@@ -18,27 +20,32 @@ class Lk21 : MainAPI() {
         TvType.Anime
     )
 
+    private val cfKiller by lazy { CloudflareKiller() }
+
     private val requestHeaders = mapOf(
         "User-Agent" to "Mozilla/5.0 (Linux; Android 14; Mobile) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Mobile Safari/537.36",
+        "Accept" to "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
         "Referer" to "$mainUrl/"
     )
 
     override val mainPage = mainPageOf(
+        "$mainUrl/" to "Film Unggulan",
         "$mainUrl/populer" to "Film Terpopuler",
         "$mainUrl/latest" to "Baru Diupload",
         "$mainUrl/rating" to "Rating Tertinggi",
-        "$mainUrl/release" to "Rilis Terbaru",
-        "$mainUrl/top-movie-today" to "Film Unggulan"
+        "$mainUrl/release" to "Rilis Terbaru"
     )
 
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {
-        val url = if (page <= 1) {
-            request.data
-        } else {
-            "${request.data}/page/$page"
+        val url = when {
+            request.data == "$mainUrl/" -> if (page <= 1) mainUrl else "$mainUrl/latest/page/$page"
+            page <= 1 -> request.data
+            else -> "${request.data}/page/$page"
         }
-        val document = app.get(url, headers = requestHeaders).document
-        val home = document.select("div.gallery-grid article, ul.sliders li.slider article, article[itemtype*='Movie'], article").mapNotNull {
+
+        val res = app.get(url, headers = requestHeaders, interceptor = cfKiller)
+        val document = res.document
+        val home = document.select("article, div.gallery-grid > div, ul.sliders li.slider").mapNotNull {
             it.toSearchResult()
         }.distinctBy { it.url }
 
@@ -51,11 +58,11 @@ class Lk21 : MainAPI() {
     private fun Element.toSearchResult(): SearchResponse? {
         val anchor = this.selectFirst("figure a[href], a[itemprop='url'], a[href]") ?: return null
         val rawHref = anchor.attr("href")
-        if (rawHref.isEmpty() || rawHref.startsWith("#") || rawHref.contains("/genre/") || rawHref.contains("/country/") || rawHref.contains("/year/")) {
+        if (rawHref.isEmpty() || rawHref.startsWith("#") || rawHref.contains("/genre/") || rawHref.contains("/country/") || rawHref.contains("/year/") || rawHref.contains("/artist/") || rawHref.contains("/director/")) {
             return null
         }
 
-        val title = this.selectFirst("h3.poster-title, figcaption h3, [itemprop='name']")?.text()?.trim()
+        val title = this.selectFirst("h3.poster-title, figcaption h3, [itemprop='name'], .video-title")?.text()?.trim()
             ?: anchor.attr("title")
                 .replace(Regex("""^Nonton (movie|series)\s+""", RegexOption.IGNORE_CASE), "")
                 .replace(Regex("""\s+streaming gratis$""", RegexOption.IGNORE_CASE), "")
@@ -92,14 +99,51 @@ class Lk21 : MainAPI() {
     }
 
     override suspend fun search(query: String): List<SearchResponse> {
-        val document = app.get("$mainUrl/search?s=$query", headers = requestHeaders).document
-        return document.select("div.gallery-grid article, article[itemtype*='Movie'], article").mapNotNull {
-            it.toSearchResult()
-        }.distinctBy { it.url }
+        val results = mutableListOf<SearchResponse>()
+
+        // 1. Coba endpoint pencarian HTML standar LK21
+        try {
+            val res = app.get("$mainUrl/?s=$query", headers = requestHeaders, interceptor = cfKiller)
+            res.document.select("article, div.gallery-grid > div").mapNotNullTo(results) {
+                it.toSearchResult()
+            }
+        } catch (_: Exception) {
+        }
+
+        // 2. Fallback ke data-search_url (gudangvape.com) yang dipakai LK21 untuk live search
+        if (results.isEmpty()) {
+            try {
+                val homeDoc = app.get(mainUrl, headers = requestHeaders, interceptor = cfKiller).document
+                val searchHost = homeDoc.selectFirst("body")?.attr("data-search_url")?.trimEnd('/') ?: "https://gudangvape.com"
+                val apiRes = app.get("$searchHost/search.php?s=$query", headers = requestHeaders).text
+                if (apiRes.trim().startsWith("{")) {
+                    val arr = JSONObject(apiRes).optJSONArray("data")
+                    if (arr != null) {
+                        for (i in 0 until arr.length()) {
+                            val item = arr.getJSONObject(i)
+                            val title = item.optString("title").trim()
+                            val slug = item.optString("slug").trim()
+                            val posterPath = item.optString("poster").trim()
+                            if (title.isNotEmpty() && slug.isNotEmpty()) {
+                                val poster = if (posterPath.startsWith("http")) posterPath else "https://poster.assetsy.de/wp-content/uploads/$posterPath"
+                                results.add(
+                                    newMovieSearchResponse(title, "$mainUrl/$slug", TvType.Movie) {
+                                        this.posterUrl = poster
+                                    }
+                                )
+                            }
+                        }
+                    }
+                }
+            } catch (_: Exception) {
+            }
+        }
+
+        return results.distinctBy { it.url }
     }
 
     override suspend fun load(url: String): LoadResponse? {
-        val document = app.get(url, headers = requestHeaders).document
+        val document = app.get(url, headers = requestHeaders, interceptor = cfKiller).document
         val rawTitle = document.selectFirst("div.movie-info > h1, h1")?.text()?.trim() ?: return null
         val title = rawTitle.replace(Regex("""\(\d{4}\)$"""), "").trim()
         val year = Regex("""\((\d{4})\)$""").find(rawTitle)?.groupValues?.getOrNull(1)?.toIntOrNull()
@@ -242,7 +286,7 @@ class Lk21 : MainAPI() {
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ): Boolean {
-        val document = app.get(data, headers = requestHeaders).document
+        val document = app.get(data, headers = requestHeaders, interceptor = cfKiller).document
         val servers = mutableMapOf<String, String>()
 
         document.select("ul#player-list li a[data-url]").forEach { el ->
